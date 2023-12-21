@@ -25,11 +25,14 @@ def parser_args():
     # data
     parser.add_argument('--dataset', default='cifar10_dvs', type=str, help='dataset')
     parser.add_argument('--root', default='/home/haohq/datasets/CIFAR10DVS', type=str, help='path to dataset')
-    parser.add_argument('--seq_len', default=1024, type=int, help='length of event sequence')
+    parser.add_argument('--duration', default=10000, type=int, help='temporal resolution')
     parser.add_argument('--nclasses', default=10, type=int, help='number of classes')
     parser.add_argument('--batch_size', default=256, type=int, help='batch size')
     # model
-    # todo
+    parser.add_argument('--d_model', default=1024, type=int, help='hidden size')
+    parser.add_argument('--nhead', default=32, type=int, help='number of heads')
+    parser.add_argument('--num_layers', default=6, type=int, help='number of layers')
+    parser.add_argument('--dim_feedforward', default=2048, type=int, help='dim feedforward')
     # run
     parser.add_argument('--device_id', default=6, type=int, help='GPU id to use, only available in non-distributed training')
     parser.add_argument('--nepochs', default=200, type=int, help='number of epochs')
@@ -53,24 +56,22 @@ def parser_args():
 
 def load_data(args):
     
-    if args.dataset == 'asl_dvs':  
-        dataset = asl_dvs.ASLDVS(root=args.root, data_type='frame', frames_number=args.nsteps, split_by='time', duration=args.duration)
+    if args.dataset == 'cifar10_dvs':  # downloaded
+        dataset = cifar10_dvs.CIFAR10DVS(root=args.root, data_type='frame', duration=args.duration, split_by='time')
         train_dataset, val_dataset, test_dataset = split3dataset(0.8, 0.1, dataset, args.nclasses, random_split=False)
-    elif args.dataset == 'cifar10_dvs':  # downloaded
-        dataset = cifar10_dvs.CIFAR10DVS(root=args.root, data_type='frame', frames_number=args.nsteps, split_by='time', duration=args.duration)
-        train_dataset, val_dataset, test_dataset = split3dataset(0.8, 0.1, dataset, args.nclasses, random_split=False)
-    elif args.dataset == 'dvs128_gesture':  # downloaded
-        dataset = dvs128_gesture.DVS128Gesture
-        train_dataset = dataset(root=args.root, train=True, data_type='frame', duration=args.duration)
-        test_dataset = dataset(root=args.root, train=False, data_type='frame', duration=args.duration)
-        train_dataset, val_dataset = split2dataset(0.9, train_dataset, args.nclasses, random_split=True)
-    elif args.dataset == 'n_caltech101':  # downloaded
-        dataset = n_caltech101.NCaltech101(root=args.root, data_type='frame', frames_number=args.nsteps, split_by='time', duration=args.duration)
-        train_dataset, val_dataset, test_dataset= split3dataset(0.8, 0.1, dataset, args.nclasses, random_split=False)
-    elif args.dataset == 'n_mnist':  # downloaded
-        train_dataset = n_mnist.NMNIST(root=args.root, train=True, data_type='frame', frames_number=args.nsteps, split_by='time', duration=args.duration)
-        test_dataset = n_mnist.NMNIST(root=args.root, train=False, data_type='frame', frames_number=args.nsteps, split_by='time', duration=args.duration)
-        train_dataset, val_dataset = split2dataset(0.9, train_dataset, args.nclasses, random_split=True)
+    # elif args.dataset == 'dvs128_gesture':  # downloaded
+    #     dataset = dvs128_gesture.DVS128Gesture
+    #     train_dataset = dataset(root=args.root, train=True, data_type='frame', duration=args.duration)
+    #     test_dataset = dataset(root=args.root, train=False, data_type='frame', duration=args.duration)
+    #     train_dataset, val_dataset = split2dataset(0.9, train_dataset, args.nclasses, random_split=True)
+    # elif args.dataset == 'n_caltech101':  # downloaded
+    #     dataset = n_caltech101.NCaltech101(root=args.root, data_type='frame', frames_number=args.nsteps, split_by='time', duration=args.duration)
+    #     train_dataset, val_dataset, test_dataset= split3dataset(0.8, 0.1, dataset, args.nclasses, random_split=False)
+    # elif args.dataset == 'n_mnist':  # downloaded
+    #     train_dataset = n_mnist.NMNIST(root=args.root, train=True, data_type='frame', frames_number=args.nsteps, split_by='time', duration=args.duration)
+    #     test_dataset = n_mnist.NMNIST(root=args.root, train=False, data_type='frame', frames_number=args.nsteps, split_by='time', duration=args.duration)
+    #     train_dataset, val_dataset = split2dataset(0.9, train_dataset, args.nclasses, random_split=True)
+    else:
         raise NotImplementedError(args.dataset)
     
     if args.distributed:
@@ -88,23 +89,30 @@ def load_data(args):
 
 def load_model(args):
     
-    model = EventTransformer(d_event=4, d_model=64, nhead=8, num_layers=12, dim_feedforward=256, dropout=0.1)
+    model = EventTransformer(d_event=2, d_model=1024, nhead=16, num_layers=6, dim_feedforward=2048, dropout=0.1)
 
     return model
 
 
 def _get_output_dir(args):
 
-    output_dir = os.path.join(args.output_dir, f'{args.dataset}_b{args.batch_size}_lr{args.lr}_T{args.nsteps}')
+    output_dir = os.path.join(args.output_dir, f'{args.dataset}_\
+                                b{args.batch_size}_\
+                                d{args.d_model}_\
+                                n{args.nhead}_\
+                                l{args.num_layers}_\
+                                f{args.dim_feedforward}_\
+                                lr{args.lr}_\
+                                d{args.duration}')
     
     if args.weight_decay:
         output_dir += f'_wd{args.weight_decay}'
 
     # criterion
     if args.criterion == 'CrossEntropyLoss':
-        output_dir += '_CE'
+        output_dir += '_ce'
     elif args.criterion == 'MSELoss':
-        output_dir += '_MSE'
+        output_dir += '_mse'
     else:
         raise NotImplementedError(args.criterion)
 
@@ -139,7 +147,6 @@ def train(
     val_loader: DataLoader,
     nepochs: int,
     epoch: int,
-    # tb_writer: SummaryWriter,
     output_dir: str,
     args: argparse.Namespace,
 ):  
@@ -168,8 +175,7 @@ def train(
             label = label.cuda(non_blocking=True)
             input = input.transpose(0, 1)
             target = to_onehot(label, args.nclasses).cuda(non_blocking=True)
-            # target = target.cuda(non_blocking=True)
-            output = model(input).mean(dim=0).squeeze()
+            output = model(input)
             loss = criterion(output, target)
             loss.backward()
             optimizer.step()
@@ -207,7 +213,7 @@ def train(
                 label = label.cuda(non_blocking=True)
                 input = input.transpose(0, 1)
                 target = to_onehot(label, args.nclasses).cuda(non_blocking=True)
-                output = model(input).mean(dim=0).squeeze()  # batch_size, num_classes
+                output = model(input)  # batch_size, num_classes
                 loss = criterion(output, target)
 
                 # calculate the top5 and top1 accurate numbers
@@ -256,7 +262,7 @@ def test(
             input = input.cuda(non_blocking=True)
             label = label.cuda(non_blocking=True)
             input = input.transpose(0, 1)
-            output = model(input).mean(dim=0).squeeze()
+            output = model(input)  # batch_size, num_classes
 
             # calculate the top5 and top1 accurate numbers
             _, predicted = output.topk(5, 1, True, True)

@@ -1,2 +1,6 @@
-./datasets/
+datasets/
 test.py
+scripts/
+__pycache__/
+outputs/
+```

@@ -31,8 +31,7 @@ def split2dataset(train_ratio: float, origin_dataset: torch.utils.data.Dataset, 
     for i in range(num_classes):
         label_idx.append([])
 
-    for i, item in enumerate(origin_dataset):
-        y = item[1]
+    for i, (_, y) in enumerate(origin_dataset):
         if isinstance(y, np.ndarray) or isinstance(y, torch.Tensor):
             y = y.item()
         label_idx[y].append(i)
@@ -66,8 +65,7 @@ def split3dataset(train_ratio: float, val_ratio: float, origin_dataset: torch.ut
     for i in range(num_classes):
         label_idx.append([])
 
-    for i, item in enumerate(origin_dataset): 
-        y = item[1]  # item[1] is the label
+    for i, (_, y) in enumerate(origin_dataset): 
         if isinstance(y, np.ndarray) or isinstance(y, torch.Tensor):
             y = y.item()  # convert to int
         label_idx[y].append(i)

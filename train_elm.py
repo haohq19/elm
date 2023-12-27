@@ -10,10 +10,10 @@ from torch.utils.data import DataLoader
 from spikingjelly.datasets import asl_dvs, cifar10_dvs, dvs128_gesture, n_caltech101, n_mnist
 from spikingjelly.datasets import split_to_train_test_set
 from utils import *
-from models.event_transformer import EventTransformer
+from models.event_transformer import EventResNet
 
-_seed_ = 2020
-random.seed(2020)
+_seed_ = 2023
+random.seed(2023)
 torch.manual_seed(_seed_)
 torch.cuda.manual_seed_all(_seed_)
 torch.backends.cudnn.deterministic = True
@@ -21,7 +21,7 @@ torch.backends.cudnn.benchmark = False
 np.random.seed(_seed_)
 
 def parser_args():
-    parser = argparse.ArgumentParser(description='train a SNN')
+    parser = argparse.ArgumentParser(description='train')
     # data
     parser.add_argument('--dataset', default='n_mnist', type=str, help='dataset')
     parser.add_argument('--root', default='/home/haohq/datasets/NMNIST', type=str, help='path to dataset')
@@ -30,24 +30,15 @@ def parser_args():
     parser.add_argument('--nclasses', default=10, type=int, help='number of classes')
     parser.add_argument('--batch_size', default=1024, type=int, help='batch size')
     # model
-    parser.add_argument('--d_model', default=512, type=int, help='hidden size')
-    parser.add_argument('--nhead', default=1, type=int, help='number of heads')
-    parser.add_argument('--num_layers', default=1, type=int, help='number of layers')
-    parser.add_argument('--dim_feedforward', default=512, type=int, help='dim feedforward')
+    parser.add_argument('--d_model', default=512, type=int, help='d_model')
+
     # run
     parser.add_argument('--device_id', default=6, type=int, help='GPU id to use, only available in non-distributed training')
     parser.add_argument('--nepochs', default=200, type=int, help='number of epochs')
     parser.add_argument('--nworkers', default=16, type=int, help='number of workers')
     parser.add_argument('--lr', default=0.01, type=float, help='learning rate')
-    parser.add_argument('--momentum', default=0.9, type=float, help='momentum')
-    parser.add_argument('--weight_decay', default=0, type=float, help='weight decay')
-    parser.add_argument('--optim', default='Adam', type=str, help='optimizer')
     parser.add_argument('--output_dir', default='outputs/', help='path to save')
     parser.add_argument('--save_freq', default=10, type=int, help='save frequency')
-    parser.add_argument('--sched', default='StepLR', type=str, help='scheduler')
-    parser.add_argument('--step_size', default=40, type=int, help='step size for scheduler')
-    parser.add_argument('--gamma', default=0.1, type=float, help='gamma for scheduler')
-    parser.add_argument('--resume', help='resume from checkpoint', action='store_true')
     # dist
     parser.add_argument('--world-size', default=8, type=int, help='number of distributed processes')
     parser.add_argument('--dist-url', default='env://', help='url used to set up distributed training')
@@ -84,13 +75,9 @@ def load_data(args):
 
 def load_model(args):
     
-    model = EventTransformer(
+    model = EventResNet(
         in_channels=2,
         d_model=args.d_model,
-        nhead=args.nhead,
-        num_layers=args.num_layers,
-        dim_feedforward=args.dim_feedforward,
-        seq_len=args.nframes,
         num_classes=args.nclasses,
         )
 
@@ -99,10 +86,8 @@ def load_model(args):
 
 def _get_output_dir(args):
 
-    output_dir = os.path.join(args.output_dir, f'{args.dataset}_b{args.batch_size}_dm{args.d_model}_nh{args.nhead}_nl{args.num_layers}_df{args.dim_feedforward}_lr{args.lr}_T{args.nframes}')
+    output_dir = os.path.join(args.output_dir, f'resnet18_{args.dataset}_b{args.batch_size}_dm{args.d_model}_lr{args.lr}_T{args.nframes}')
     
-    if args.weight_decay:
-        output_dir += f'_wd{args.weight_decay}'
 
     # criterion
     if args.criterion == 'CrossEntropyLoss':
@@ -113,21 +98,12 @@ def _get_output_dir(args):
         raise NotImplementedError(args.criterion)
 
     # optimizer
-    if args.optim == 'Adam':
+    if args.optimizer == 'Adam':
         output_dir += '_adam'
-    elif args.optim == 'SGD':
+    elif args.optimizer == 'SGD':
         output_dir += '_sgd'
     else:
-        raise NotImplementedError(args.optim)
-
-    if args.momentum:
-        output_dir += f'_mom{args.momentum}'
-
-    # scheduler
-    if args.sched == 'StepLR':
-        output_dir += f'_step{args.step_size}_gamma{args.gamma}'
-    else:
-        raise NotImplementedError(args.sched)
+        raise NotImplementedError(args.optimizer)
 
     return output_dir
 
@@ -135,7 +111,6 @@ def train(
     model: nn.Module,
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler._LRScheduler,
     train_loader: DataLoader,
     test_loader: DataLoader,
     nepochs: int,
@@ -228,16 +203,14 @@ def train(
         
         # save
         epoch += 1
-        scheduler.step()
         if epoch % args.save_freq == 0:
             checkpoint = {
-                'model': model.state_dict(),
+                'model': model.embedding.embedding.state_dict(),
                 'optimizer': optimizer.state_dict(),
-                'scheduler': scheduler.state_dict(),
                 'epoch': epoch,
                 'args': args,
             }
-            save_name = 'checkpoints/epoch{}_valacc{:.2f}.pth'.format(epoch, top1_accuracy)
+            save_name = 'checkpoints/ep{}_vl{:.3f}.pth'.format(epoch, total_loss)
             save_on_master(checkpoint, os.path.join(output_dir, save_name))
             print('saved checkpoint to {}'.format(output_dir))
 
@@ -258,48 +231,25 @@ def main(args):
 
     # criterion
     criterion = nn.CrossEntropyLoss()
-    args.criterion = criterion.__class__.__name__
-    
-    # resume
-    output_dir = _get_output_dir(args)
-    state_dict = None
-    if args.resume:
-        checkpoints = glob.glob(os.path.join(output_dir, 'checkpoints/*.pth'))
-        if checkpoints:
-            latest_checkpoint = max(checkpoints, key=os.path.getctime)
-            state_dict = torch.load(latest_checkpoint)
-            print('load checkpoint from {}'.format(latest_checkpoint))
+    args.criterion = criterion.__class__.__name__  
 
     # model
-    
     model = load_model(args)
-    if state_dict:
-        model.load_state_dict({k.replace('module.', ''):v for k, v in state_dict['model'].items()})
     model.cuda()
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank], find_unused_parameters=True)
-    
+    params = filter(lambda p: p.requires_grad, model.parameters())
+
+    # optimizer
+    optimizer = torch.optim.Adam(params, lr=args.lr)
+    args.optimizer = optimizer.__class__.__name__
+
     # run
     epoch = 0
-    optim = args.optim
-    sched = args.sched
-    params = filter(lambda p: p.requires_grad, model.parameters())
-    if optim == 'SGD':
-        optimizer = torch.optim.SGD(params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
-    elif optim == 'Adam':
-        optimizer = torch.optim.Adam(params, lr=args.lr, weight_decay=args.weight_decay)
-    else:
-        raise NotImplementedError(optim)
-    if sched == 'StepLR':
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
-    else:
-        raise NotImplementedError(sched)
-    if state_dict:
-        optimizer.load_state_dict(state_dict['optimizer'])
-        scheduler.load_state_dict(state_dict['scheduler'])
-        epoch = state_dict['epoch']
-
+    
     # output_dir
+    output_dir = _get_output_dir(args)
+
     if is_master():
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
@@ -311,7 +261,6 @@ def main(args):
         model=model,
         criterion=criterion,
         optimizer=optimizer,
-        scheduler=scheduler,
         train_loader=train_loader,
         test_loader=test_loader,
         nepochs=args.nepochs,
@@ -326,6 +275,3 @@ if __name__ == '__main__':
     main(args)
 
 
-'''
-python -m torch.distributed.run --nproc_per_node=8 train.py  --batch_size 40
-'''

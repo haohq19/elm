@@ -22,7 +22,7 @@ def prepare_event_data(root):
             np.save(os.path.join(target_path, dir, file[:-4]), events)
             
 
-
+def convert_to_language(root)
 
 if __name__ == "__main__":
     root = "/home/haohq/datasets/elm/CIFAR10DVS"

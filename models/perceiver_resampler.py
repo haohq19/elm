@@ -17,7 +17,7 @@ class PositionalEncoding(torch.nn.Module):
         self.encoding = self.encoding.unsqueeze(0)
 
     def forward(self, x):
-        return x + self.encoding[:, :x.size(1)].detach()
+        return x + self.encoding[:, :x.size(1)].detach().to(x.device)
 
 
 # FFN
@@ -82,6 +82,7 @@ class PerceiverAttention(nn.Module):
 class PerceiverResampler(nn.Module):
     def __init__(
         self,
+        d_input,
         d_model = 4096,
         num_layers = 2,
         d_head = 256,
@@ -92,7 +93,7 @@ class PerceiverResampler(nn.Module):
         super().__init__()
         self.latents = nn.Parameter(torch.randn(num_latents, d_model))
         self.pos_encoding = PositionalEncoding(d_model)
-
+        self.fc = nn.Linear(d_input, d_model)
         self.layers = nn.ModuleList([])
         for _ in range(num_layers):
             self.layers.append(nn.ModuleList([
@@ -103,7 +104,8 @@ class PerceiverResampler(nn.Module):
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, x):
-
+        # x.shape = [batch_size, nsteps, d_input]
+        x = self.fc(x)  # x.shape = [batch_size, nsteps, d_model]
         x = self.pos_encoding(x)  # x.shape = [batch_size, nsteps, d_model]
         latents = repeat(self.latents, 'n d -> b n d', b = x.shape[0])  # latents.shape = [batch_size, num_latents, d_model]
 
@@ -115,7 +117,7 @@ class PerceiverResampler(nn.Module):
 
 
 if __name__ == '__main__':
-    model = PerceiverResampler()
-    x = torch.randn(2, 64, 512)
+    model = PerceiverResampler(d_input = 512)
+    x = torch.randn(2, 8, 512)
     out = model(x)
     print(out.shape)

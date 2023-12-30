@@ -12,13 +12,13 @@ class EventFrameEmbedding(nn.Module):
         self.embedding = resnet18(num_classes=d_model)
 
     def forward(self, x):
-        # x: (seq_len, batch_size, in_channels, height, width)
-        # output: (seq_len, batch_size, d_model)
-        seq_len = x.shape[0]
-        batch_size = x.shape[1]
-        x = x.reshape(seq_len * batch_size, x.shape[2], x.shape[3], x.shape[4])  # (seq_len * batch_size, in_channels, height, width) 
-        x = self.embedding(x)                                                 # (seq_len * batch_size, d_model)
-        return x.reshape(seq_len, batch_size, -1)                                # (seq_len, batch_size, d_model)
+        # x: (batch_size, nsteps, in_channels, height, width)
+        # output: (batch_size, nsteps, d_model)
+        batch_size = x.shape[0]
+        nsteps = x.shape[1]
+        x = x.reshape(nsteps * batch_size, x.shape[2], x.shape[3], x.shape[4])  # (batch_size * nsteps, in_channels, height, width) 
+        x = self.embedding(x)                                                 # (batch_size * nsteps, d_model)
+        return x.reshape(batch_size, nsteps, -1)                                # (batch_size, nsteps, d_model)
 
 
 class EventTransformer(nn.Module):

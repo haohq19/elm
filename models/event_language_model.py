@@ -1,4 +1,4 @@
-from typing import List, Union, Tuple
+from typing import List, Union, Tuple, Optional
 
 import torch
 import torch.nn as nn
@@ -32,9 +32,36 @@ def accumulate_padding(input_embeds: torch.Tensor, attention_mask: torch.Tensor,
 
     return new_input_embeds, new_attention_masks
 
-class EventLanguageModel(nn.Module):
 
-    def __init__(self, d_vision, d_model, lm_model_id='gpt2-large'):
+class EventLanguageModel(nn.Module):
+    """
+    EventLanguageModel is a PyTorch module that combines event frame embedding and text token embedding
+    to generate language representations for event understanding tasks.
+
+    Args:
+        d_vision (int): The dimension of the event frame embedding.
+        d_model (int): The dimension of the language representation.
+        lm_model_id (str, optional): The identifier of the pre-trained language model. Defaults to 'gpt2-large'.
+
+    Attributes:
+        vision_encoder (EventFrameEmbedding): The event frame embedding module.
+        tokenizer (AutoTokenizer): The tokenizer for text token embedding.
+        language_decoder (AutoModelForCausalLM): The language model for text token embedding.
+        mapper (PerceiverResampler): The module for mapping event frame embedding to language representation.
+
+    Methods:
+        embed_event(events: torch.Tensor) -> torch.Tensor:
+            Embeds event frames into latent vectors.
+
+        embed_text(ids: torch.Tensor) -> torch.Tensor:
+            Embeds text tokens into latent vectors.
+
+        forward(events: int, target_ids: torch.Tensor, prefix_ids=None) -> torch.Tensor:
+            Forward pass of the EventLanguageModel.
+
+    """
+
+    def __init__(self, d_vision: int, d_model: int, lm_model_id: str = 'gpt2-large'):
         super(EventLanguageModel, self).__init__()
         self.d_vision = d_vision
         self.d_model = d_model
@@ -55,25 +82,44 @@ class EventLanguageModel(nn.Module):
         self.mapper = PerceiverResampler(d_input=d_vision, d_model=d_model)
         
     
-    def embed_event(self, events: torch.Tensor):
-        # embed event frames into latent vectors
-        # events.shape = [batch_size, nsteps, in_channels, height, width]
+    def embed_event(self, events: torch.Tensor) -> torch.Tensor:
+        """
+        Embeds event frames into latent vectors.
+
+        Args:
+            events (torch.Tensor): The event frames. Shape: [batch_size, nsteps, in_channels, height, width]
+
+        Returns:
+            torch.Tensor: The embedded event frames. Shape: [batch_size, nsteps, d_model]
+        """
         with torch.no_grad():
             embeds = self.vision_encoder(events)  # embed.shape = [batch_size, nsteps, d_vision]
         embeds = self.mapper(embeds)  # embed.shape = [batch_size, nsteps, d_model]
         return embeds
     
-    def embed_text(self, ids: torch.Tensor):
-        # embed text tokens into latent vectors
-        # ids.shape = [batch_size, ntokens]
+    def embed_text(self, ids: torch.Tensor) -> torch.Tensor:
+        """
+        Embeds text tokens into latent vectors.
+
+        Args:
+            ids (torch.Tensor): The text tokens. Shape: [batch_size, ntokens]
+
+        Returns:
+            torch.Tensor: The embedded text tokens. Shape: [batch_size, ntokens, d_model]
+        """
         with torch.no_grad():
             embeds = self.language_decoder.transformer.wte(ids)    # token_embeds.shape = [batch_size, ntokens, d_model]
         return embeds
 
-    def forward(self, events: int, target_ids: torch.Tensor, prefix_ids = None):
-        # events.shape = [batch_size, nsteps, 2, height, width]
-        # target_ids.shape = [batch_size, ntargets]
-        # prefix_ids.shape = [batch_size, nprefixs]
+    def forward(self, events: int, target_ids: torch.Tensor, prefix_ids : Union(Optional, torch.Tensor) = None) -> torch.Tensor:
+        """
+        Forward pass of the EventLanguageModel.
+
+        Args:
+            events (int): The event frames. Shape: [batch_size, nsteps, 2, height, width]
+            target_ids (torch.Tensor): The target text tokens. Shape: [batch_size, ntargets]
+            prefix_ids (torch.Tensor, optional): The prefix text tokens. Shape: [batch_size, nprefixs]
+        """
         event_embeds = self.embed_event(events).half()  # event_embed.shape = [batch_size, nsteps, d_model]
         target_embeds = self.embed_text(target_ids)  # target_embeds.shape = [batch_size, ntargets, d_model]
         if prefix_ids is None:

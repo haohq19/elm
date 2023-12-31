@@ -3,6 +3,4 @@ scripts/
 __pycache__/
 outputs/
 test.py
-train_resnet.py
-train_event_transformer.py
 ```

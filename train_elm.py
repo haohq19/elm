@@ -10,8 +10,9 @@ from torch.utils.data import DataLoader
 from spikingjelly.datasets import asl_dvs, cifar10_dvs, dvs128_gesture, n_caltech101, n_mnist
 from spikingjelly.datasets import split_to_train_test_set
 from utils import *
-from models.event_transformer import EventResNet
+from models.event_language_model import EventLanguageModel
 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 _seed_ = 2023
 random.seed(2023)
 torch.manual_seed(_seed_)
@@ -23,14 +24,18 @@ np.random.seed(_seed_)
 def parser_args():
     parser = argparse.ArgumentParser(description='train')
     # data
-    parser.add_argument('--dataset', default='n_mnist', type=str, help='dataset')
-    parser.add_argument('--root', default='/home/haohq/datasets/NMNIST', type=str, help='path to dataset')
+    parser.add_argument('--dataset', default='cifar10_dvs', type=str, help='dataset')
+    parser.add_argument('--root', default='/home/haohq/datasets/CIFAR10DVS', type=str, help='path to dataset')
     parser.add_argument('--nframes', default=16, type=int, help='number of frames')
 
     parser.add_argument('--nclasses', default=10, type=int, help='number of classes')
-    parser.add_argument('--batch_size', default=1024, type=int, help='batch size')
+    parser.add_argument('--batch_size', default=64, type=int, help='batch size')
+    
     # model
-    parser.add_argument('--d_model', default=512, type=int, help='d_model')
+    parser.add_argument('--d_vision', default=512, type=int, help='d_vision')
+    parser.add_argument('--d_model', default=1280, type=int, help='d_model')
+    parser.add_argument('--nvlatents', default=4, type=int, help='nvlatents')
+    parser.add_argument('--lm_model_id', default='gpt2-large', type=str, help='model_id of language model')
 
     # run
     parser.add_argument('--device_id', default=6, type=int, help='GPU id to use, only available in non-distributed training')
@@ -75,10 +80,11 @@ def load_data(args):
 
 def load_model(args):
     
-    model = EventResNet(
-        in_channels=2,
+    model = EventLanguageModel(
+        d_vision=args.d_vision,
         d_model=args.d_model,
-        num_classes=args.nclasses,
+        nvlatents=args.nvlatents,
+        lm_model_id=args.lm_model_id,
         )
 
     return model
@@ -86,33 +92,16 @@ def load_model(args):
 
 def _get_output_dir(args):
 
-    output_dir = os.path.join(args.output_dir, f'resnet18_{args.dataset}_b{args.batch_size}_dm{args.d_model}_lr{args.lr}_T{args.nframes}')
-    
-
-    # criterion
-    if args.criterion == 'CrossEntropyLoss':
-        output_dir += '_ce'
-    elif args.criterion == 'MSELoss':
-        output_dir += '_mse'
-    else:
-        raise NotImplementedError(args.criterion)
-
-    # optimizer
-    if args.optimizer == 'Adam':
-        output_dir += '_adam'
-    elif args.optimizer == 'SGD':
-        output_dir += '_sgd'
-    else:
-        raise NotImplementedError(args.optimizer)
+    output_dir = os.path.join(args.output_dir, f'elm_{args.dataset}_dv{args.d_vision}_dm{args.d_model}_nl_{args.nvlatents}_lm{args.lm_model_id}_lr{args.lr}_T{args.nframes}')
 
     return output_dir
 
 def train(
     model: nn.Module,
-    criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
     train_loader: DataLoader,
     test_loader: DataLoader,
+    prefix: str,
     nepochs: int,
     epoch: int,
     output_dir: str,
@@ -121,6 +110,11 @@ def train(
     if is_master():
         tb_writer = SummaryWriter(output_dir + '/log')
         print('log saved to {}'.format(output_dir + '/log'))
+
+    classes = train_loader.dataset.classes
+    class_ids = model.tokenizer(classes, padding='longest', return_tensors='pt').input_ids[:, 0].cuda(non_blocking=True)
+    prefix_id = model.tokenizer(prefix, padding='longest', return_tensors='pt').input_ids[:, 0].cuda(non_blocking=True)
+
 
     torch.cuda.empty_cache()
     # train 
@@ -137,28 +131,32 @@ def train(
         if is_master():
             import tqdm
             process_bar = tqdm.tqdm(total=nsteps_per_epoch)
-        for input, label in train_loader:
+        for inputs, labels in train_loader:
             optimizer.zero_grad()
-            input = input.cuda(non_blocking=True)
-            label = label.cuda(non_blocking=True)
-            input = input.transpose(0, 1)
-            target = to_onehot(label, args.nclasses).cuda(non_blocking=True)
-            output = model(input)
-            loss = criterion(output, target)
+            inputs = inputs.cuda(non_blocking=True)
+            labels = labels.cuda(non_blocking=True)
+            targets = [classes[label].replace('_', ' ') for label in labels]
+            target_ids = model.tokenizer(targets, padding='longest', return_tensors='pt').input_ids.cuda(non_blocking=True)
+            prefix_ids = prefix_id.repeat(inputs.shape[0], 1)
+            output = model(events=inputs, target_ids=target_ids, prefix_ids=prefix_ids)
+            loss = output.loss
             loss.backward()
             optimizer.step()
 
             # calculate the top5 and top1 accurate numbers
-            _, predicted = output.topk(5, 1, True, True)
-            top1_correct += predicted[:, 0].eq(label).sum().item()
-            top5_correct += predicted.T.eq(label[None]).sum().item()
+            probs = output.logits[:, args.nvlatents + len(prefix_id), :].index_select(dim=1, index=class_ids)
+            _, predicted = probs.topk(5, 1, True, True)
+
+            top1_correct += predicted[:, 0].eq(labels).sum().item()
+            top5_correct += predicted.T.eq(labels[None]).sum().item()
             total_loss += loss.item()
             step += 1
             if is_master():
                 tb_writer.add_scalar('step_loss', loss.item(), epoch * nsteps_per_epoch + step)
                 process_bar.update(1)
+                process_bar.set_postfix(loss=loss, refresh=True)
         if args.distributed:
-            top1_correct, top5_correct, total_loss =global_meters_all_sum(args, top1_correct, top5_correct, total_loss)
+            top1_correct, top5_correct, total_loss = global_meters_all_sum(args, top1_correct, top5_correct, total_loss)
         top1_accuracy = top1_correct / total * 100
         top5_accuracy = top5_correct / total * 100
         if is_master():    
@@ -176,18 +174,21 @@ def train(
         total = len(test_loader.dataset)
         total_loss = 0
         with torch.no_grad():
-            for input, label in test_loader:
-                input = input.cuda(non_blocking=True)
-                label = label.cuda(non_blocking=True)
-                input = input.transpose(0, 1)
-                target = to_onehot(label, args.nclasses).cuda(non_blocking=True)
-                output = model(input)  # batch_size, num_classes
-                loss = criterion(output, target)
+            for inputs, labels in test_loader:
+                inputs = inputs.cuda(non_blocking=True)
+                labels = labels.cuda(non_blocking=True)
+                targets = [classes[label].replace('_', ' ') for label in labels]
+                target_ids = model.tokenizer(targets, padding='longest', return_tensors='pt').input_ids.cuda(non_blocking=True)
+                prefix_ids = prefix_id.repeat(inputs.shape[0], 1)
+                output = model(events=inputs, target_ids=target_ids, prefix_ids=prefix_ids)
+                loss = output.loss
 
                 # calculate the top5 and top1 accurate numbers
-                _, predicted = output.topk(5, 1, True, True)  # batch_size, topk(5) 
-                top1_correct += predicted[:, 0].eq(label).sum().item()
-                top5_correct += predicted.T.eq(label[None]).sum().item()
+                probs = output.logits[:, args.nvlatents + len(prefix_id), :].index_select(dim=1, index=class_ids)
+                _, predicted = probs.topk(5, 1, True, True)  # batch_size, topk(5) 
+                
+                top1_correct += predicted[:, 0].eq(labels).sum().item()
+                top5_correct += predicted.T.eq(labels[None]).sum().item()
                 total_loss += loss.item()
         if args.distributed:
             top1_correct, top5_correct, total_loss = global_meters_all_sum(args, top1_correct, top5_correct, total_loss)
@@ -226,12 +227,8 @@ def main(args):
     else:
         torch.cuda.set_device(args.device_id)
 
-     # data
+    # data
     train_loader, test_loader = load_data(args)
-
-    # criterion
-    criterion = nn.CrossEntropyLoss()
-    args.criterion = criterion.__class__.__name__  
 
     # model
     model = load_model(args)
@@ -242,12 +239,11 @@ def main(args):
 
     # optimizer
     optimizer = torch.optim.Adam(params, lr=args.lr)
-    args.optimizer = optimizer.__class__.__name__
 
     # run
     epoch = 0
     
-    # output_dir
+    # output
     output_dir = _get_output_dir(args)
 
     if is_master():
@@ -256,13 +252,15 @@ def main(args):
         if not os.path.exists(os.path.join(output_dir, 'checkpoints')):
             os.makedirs(os.path.join(output_dir, 'checkpoints'))
    
+   # prefix
+    prefix = 'This is'
 
     train(
         model=model,
-        criterion=criterion,
         optimizer=optimizer,
         train_loader=train_loader,
         test_loader=test_loader,
+        prefix=prefix,
         nepochs=args.nepochs,
         epoch=epoch,
         output_dir=output_dir,

@@ -61,15 +61,18 @@ class EventLanguageModel(nn.Module):
 
     """
 
-    def __init__(self, d_vision: int, d_model: int, lm_model_id: str = 'gpt2-large'):
+    def __init__(self, d_vision: int, d_model: int, nvlatents, lm_model_id: str = 'gpt2-large'):
         super(EventLanguageModel, self).__init__()
         self.d_vision = d_vision
         self.d_model = d_model
+        self.nvlatents = nvlatents
         self.lm_model_id = lm_model_id
 
         self.vision_encoder = EventFrameEmbedding(in_channels=2, d_model=d_vision)
         for param in self.vision_encoder.parameters():
             param.requires_grad = False
+
+        self.mapper = PerceiverResampler(d_input=d_vision, d_model=d_model, num_latents=nvlatents)
 
         self.tokenizer = AutoTokenizer.from_pretrained(lm_model_id, proxies=proxies)
         if self.tokenizer._pad_token is None:
@@ -79,7 +82,7 @@ class EventLanguageModel(nn.Module):
         for param in self.language_decoder.parameters():
             param.requires_grad = False
         
-        self.mapper = PerceiverResampler(d_input=d_vision, d_model=d_model)
+        
         
     
     def embed_event(self, events: torch.Tensor) -> torch.Tensor:

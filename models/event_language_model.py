@@ -1,4 +1,4 @@
-from typing import List, Union
+from typing import List, Union, Tuple
 
 import torch
 import torch.nn as nn
@@ -13,6 +13,24 @@ proxies={'http': 'http://127.0.0.1:15777', 'https': 'http://127.0.0.1:15777'}
 logging.set_verbosity_error()
 logger = logging.get_logger('transformers')
 
+
+def accumulate_padding(input_embeds: torch.Tensor, attention_mask: torch.Tensor, padding_side: str = 'right') -> Tuple[torch.Tensor, torch.Tensor]:
+    assert padding_side in ['right', 'left']
+
+    new_input_embeds = torch.empty_like(input_embeds)
+    new_attention_masks = torch.empty_like(attention_mask)
+
+    for i, (embed, mask) in enumerate(zip(input_embeds, attention_mask)):
+        padding_indices = torch.where(mask == 0)[0]
+        non_padding_indices = torch.where(mask == 1)[0]
+        if padding_side == 'left':
+            new_indices = torch.cat((padding_indices, non_padding_indices), dim=0)
+        else:
+            new_indices = torch.cat((non_padding_indices, padding_indices), dim=0)
+        new_input_embeds[i] = embed.index_select(0, new_indices)
+        new_attention_masks[i] = mask.index_select(0, new_indices)
+
+    return new_input_embeds, new_attention_masks
 
 class EventLanguageModel(nn.Module):
 
@@ -72,6 +90,16 @@ class EventLanguageModel(nn.Module):
             prefix_mask = (prefix_ids != self.tokenizer.pad_token_id).long()
             attention_mask = torch.cat((event_mask, prefix_mask, target_mask), dim=1)
 
-        outputs = self.language_decoder(inputs_embeds=input_embeds, attention_mask=attention_mask)
+        input_embeds, attention_mask = accumulate_padding(input_embeds, attention_mask, padding_side='right')
+        
+        start_idx = event_mask.sum(dim=1)
+        if prefix_ids is not None:
+            start_idx += prefix_mask.sum(dim=1)
+        end_idx = start_idx + target_mask.sum(dim=1)
+        labels = torch.full_like(attention_mask, -100)  # -100 is the ignore index for cross-entropy loss
+        for i, (j, k) in enumerate(zip(start_idx, end_idx)):
+            labels[i, j:k] = target_ids[i, :k-j]
+        
+        outputs = self.language_decoder(inputs_embeds=input_embeds, attention_mask=attention_mask, labels=labels)
         
         return outputs

@@ -1,6 +1,5 @@
-datasets/
-test.py
-scripts/
 __pycache__/
+scripts/
 outputs/
+test.py
 ```

@@ -83,11 +83,11 @@ class PerceiverResampler(nn.Module):
     def __init__(
         self,
         d_input,
-        d_model = 4096,
-        num_layers = 2,
-        d_head = 256,
-        nheads = 16,
-        num_latents = 4,
+        d_model,
+        num_latents,
+        num_layers = 4,
+        d_head = 128,
+        nheads = 10,
         ff_mult = 2
     ):
         super().__init__()

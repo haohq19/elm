@@ -111,7 +111,7 @@ class EventLanguageModel(nn.Module):
             embeds = self.language_decoder.transformer.wte(ids)    # token_embeds.shape = [batch_size, ntokens, d_model]
         return embeds
 
-    def forward(self, events: int, target_ids: torch.Tensor, prefix_ids : Union(Optional, torch.Tensor) = None) -> torch.Tensor:
+    def forward(self, events: int, target_ids: torch.Tensor, prefix_ids : Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Forward pass of the EventLanguageModel.
 
